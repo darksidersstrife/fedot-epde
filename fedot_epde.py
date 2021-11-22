@@ -46,10 +46,19 @@ def generate_pool():
 
 
 class PdeFitness:
-    def __init__(self, pool):
+    def __init__(self, pool, coef_threshold=0.01):
         self.pool = pool
+        self.coef_threshold = coef_threshold
 
     def __call__(self, graph: OptGraph):
+
+        graph.show()
+        new_root = self.simplify(graph.root_node)
+        self.check(new_root)
+        old_root = graph.root_node
+        self.check(old_root)
+        graph.delete_subtree(old_root)
+        graph.add_node(new_root)
         graph.show()
         terms = self.evaluate(graph.root_node)
         if len(terms) < 2:
@@ -59,10 +68,28 @@ class PdeFitness:
         X = numpy.asarray(terms[:-1])
         X = numpy.transpose(X)
         lr.fit(X, y)
-        f = np.sum(lr.predict(X) ** 2)
+        indices_to_del = [i for i in range(0, len(lr.coef_)) if abs(lr.coef_[i]) < self.coef_threshold]
+        to_del = [new_root.nodes_from[i] for i in indices_to_del]
+        for node in to_del:
+            graph.delete_subtree(node)
+        graph.show()
+        self.check(graph.root_node)
+        if X.shape[1] == len(indices_to_del):
+            return [float('inf'), float('inf')]
+        X = numpy.delete(X, indices_to_del, axis=1)
+        lr.fit(X, y)
+        f = np.sum((lr.predict(X) - y) ** 2)
         return [f, graph.length]
 
-    def evaluate(self, opt_node):
+    def check(self, node: OptNode):
+        if node.content['name'] == 'sum' or node.content['name'] == 'mul':
+            for ch in node.nodes_from:
+                self.check(ch)
+        else:
+            if len(node.nodes_from) != 0:
+                print("wtf")
+
+    def evaluate(self, opt_node: OptNode):
         if opt_node.content['name'] == 'sum':
             res = []
             for node in opt_node.nodes_from:
@@ -86,6 +113,58 @@ class PdeFitness:
                     if opt_node.content['name'] in family.tokens:
                         opt_node.content['token'] = family.create(opt_node.content['name'])[1]
             return [opt_node.content['token'].evaluate().flatten()]
+
+    def simplify(self, opt_node: OptNode):
+
+        if opt_node.content['name'] != 'mul' and opt_node.content['name'] != 'sum':
+            return opt_node
+
+        simplified_children = [self.simplify(children_node) for children_node in opt_node.nodes_from]
+        opt_node = OptNode(content=opt_node.content.copy(), nodes_from=[])
+        if len(simplified_children) == 1:
+            return simplified_children[0]
+
+        if opt_node.content['name'] == 'sum':
+            for child in simplified_children:
+                if child.content['name'] == 'sum':
+                    opt_node.nodes_from += child.nodes_from
+                else:
+                    opt_node.nodes_from.append(child)
+        elif opt_node.content['name'] == 'mul':
+            opt_node = None
+            for child in simplified_children:
+                if opt_node is None:
+                    opt_node = child
+                else:
+                    def multiply_nodes(node1: OptNode, node2: OptNode):
+                        if node1.content['name'] == 'mul':
+                            if node2.content['name'] == 'mul':
+                                return OptNode(content={'name': 'mul'},
+                                               nodes_from=[*node1.nodes_from, *node2.nodes_from])
+                            elif node2.content['name'] == 'sum':
+                                return OptNode(content={'name': 'sum'},
+                                               nodes_from=[multiply_nodes(node1, n2) for n2 in node2.nodes_from])
+                            else:
+                                return OptNode(content={'name': 'mul'}, nodes_from=[*node1.nodes_from, node2])
+                        elif node1.content['name'] == 'sum':
+                            if node2.content['name'] == 'mul':
+                                return multiply_nodes(node2, node1)
+                            elif node2.content['name'] == 'sum':
+                                return OptNode(content={'name': 'sum'},
+                                               nodes_from=[multiply_nodes(n1, n2) for n1 in node1.nodes_from for n2 in
+                                                           node2.nodes_from])
+                            else:
+                                return OptNode(content={'name': 'sum'},
+                                               nodes_from=[multiply_nodes(n1, node2) for n1 in node1.nodes_from])
+                        else:
+                            if node2.content['name'] == 'mul' or node2.content['name'] == 'sum':
+                                return multiply_nodes(node2, node1)
+                            else:
+                                return OptNode(content={'name': 'mul'}, nodes_from=[node1, node2])
+
+                    opt_node = multiply_nodes(opt_node, child)
+
+        return opt_node
 
 
 def generate_tokens(pool):
@@ -118,7 +197,7 @@ def main(timeout: datetime.timedelta = None):
     tokens = generate_tokens(pool)
     rules = [has_no_self_cycled_nodes, has_no_cycle]
 
-    initial = [generate_graph(tokens) for i in range(10)]
+    initial = [generate_graph(tokens) for _ in range(10)]
 
     requirements = GPComposerRequirements(
         primary=tokens,
